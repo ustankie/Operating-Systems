@@ -11,6 +11,7 @@
 #include <signal.h>
 #include <bits/waitflags.h>
 #include <stdbool.h>
+#include <mqueue.h>
 
 #define SHARED_MEMORY_PREFIX "printer_sh%d"
 #define SEMAPHORE_PREFIX "printer_sem%d"
@@ -18,6 +19,8 @@
 #define MESSAGE_SIZE 11
 #define MAX_PRINTERS 10
 #define MAX_CLIENTS 10
+#define QUEUE_NAME "/pr_queue"
+#define MAX_MSG 3
 
 volatile bool should_close = false;
 
@@ -32,40 +35,64 @@ int printers_num;
 sem_t *semaphores[MAX_PRINTERS];
 int shared_mem[MAX_PRINTERS];
 Data *addressess[MAX_PRINTERS];
-pid_t parent=NULL;
+pid_t parent = NULL;
+mqd_t pr_queue;
 
 void handle(int signum)
 {
     should_close = true;
-    if(parent==getpid()){
-        for (int i = 0; i < printers_num; i++)
+    if (parent == getpid())
     {
-        // sem_destroy(semaphores[i]);
-        if (sem_close(semaphores[i]) < 0)
+        for (int i = 0; i < printers_num; i++)
         {
-            perror("sem_close");
+            if (sem_close(semaphores[i]) < 0)
+            {
+                perror("sem_close");
+            }
+
+            char sem_name[BUFF_SIZE];
+            char sh_name[BUFF_SIZE];
+
+            sprintf(sem_name, SEMAPHORE_PREFIX, i);
+            sprintf(sh_name, SHARED_MEMORY_PREFIX, i);
+            sem_unlink(sem_name);
+            if (munmap(addressess[i], sizeof(Data)) == -1)
+            {
+                perror("munmap");
+            }
+
+            shm_unlink(sh_name) == -1;
+
+            mq_close(pr_queue);
+            mq_unlink(QUEUE_NAME);
         }
-
-        char sem_name[BUFF_SIZE];
-        char sh_name[BUFF_SIZE];
-
-        sprintf(sem_name, SEMAPHORE_PREFIX, i);
-        sprintf(sh_name, SHARED_MEMORY_PREFIX, i);
-        sem_unlink(sem_name);
-        if (munmap(addressess[i], sizeof(Data)) == -1)
-        {
-            perror("munmap");
-        }
-
-        shm_unlink(sh_name) == -1;
-
-    }}
+    }
     exit(0);
+}
+
+void print_message(Data *data, int i, int is_from_queue)
+{
+
+    for (int j = 0; j < MESSAGE_SIZE - 1; j++)
+    {
+        if (is_from_queue)
+        {
+            printf("Client: %d from queue, printer: %d, output: %c\n", data->client_num, i, data->message[j]);
+        }
+        else
+        {
+            printf("Client: %d, printer: %d, output: %c\n", data->client_num, i, data->message[j]);
+        }
+        sleep(1);
+    }
+    if (sem_post(semaphores[i]) < 0)
+    {
+        perror("sem_post");
+    }
 }
 
 void printer_action(int i)
 {
-    printf("printer %d\n", i);
     while (!should_close)
     {
         int valp;
@@ -76,14 +103,26 @@ void printer_action(int i)
 
         if (valp == 0)
         {
-            for (int j = 0; j < MESSAGE_SIZE - 1; j++)
+            print_message(addressess[i], i, false);
+        }
+        else
+        {
+            Data msg;
+            memset(&msg, 0, sizeof(Data));
+            struct mq_attr attr;
+            mq_getattr(pr_queue, &attr);
+            if (attr.mq_curmsgs > 0)
             {
-                printf("Client: %d, printer: %d, output: %c\n", addressess[i]->client_num, i, addressess[i]->message[j]);
-                sleep(1);
-            }
-            if (sem_post(semaphores[i]) < 0)
-            {
-                perror("sem_post");
+                int a;
+                if ((a = mq_receive(pr_queue, (char *)&msg, 2 * sizeof(Data), NULL)) >= 0)
+                {
+                    sem_wait(semaphores[i]);
+                    print_message(&msg, i, true);
+                }
+                if (a < 0)
+                {
+                    perror("mq_receive");
+                }
             }
         }
     }
@@ -108,11 +147,18 @@ int main(int argc, char **argv)
 
     printf("Number of clients: %d\nNumber of printers: %d\n", clients_num, printers_num);
 
+    struct mq_attr attr;
+    attr.mq_curmsgs = 0;
+    attr.mq_flags = O_NONBLOCK;
+    attr.mq_maxmsg = MAX_MSG;
+    attr.mq_msgsize = 2 * sizeof(Data);
+
+    pr_queue = mq_open(QUEUE_NAME, O_RDONLY | O_CREAT, S_IWUSR | S_IRUSR, &attr);
+
     for (int i = 0; i < printers_num; i++)
     {
         char sem_name[BUFF_SIZE];
         char sh_name[BUFF_SIZE];
-        printf("in!\n");
 
         sprintf(sem_name, SEMAPHORE_PREFIX, i);
         sprintf(sh_name, SHARED_MEMORY_PREFIX, i);
@@ -129,7 +175,7 @@ int main(int argc, char **argv)
             perror("sem_get_value");
             return -1;
         }
-        printf("valp: %d\n", valp);
+        printf("Semphore %d value: %d\n", i, valp);
 
         shared_mem[i] = shm_open(sh_name, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
         if (shared_mem[i] < 0)
@@ -150,7 +196,6 @@ int main(int argc, char **argv)
 
     for (int i = 0; i < printers_num; i++)
     {
-        printf("i: %d %d %d\n", i, getpid(), parent);
         pid_t child = fork();
         if (child < 0)
         {
@@ -159,7 +204,7 @@ int main(int argc, char **argv)
         }
         else if (child == 0)
         {
-            printf("%d\n", getpid());
+            printf("New process %d\n", getpid());
             printer_action(i);
         }
     }
@@ -169,7 +214,6 @@ int main(int argc, char **argv)
 
     for (int i = 0; i < printers_num; i++)
     {
-        // sem_destroy(semaphores[i]);
         if (sem_close(semaphores[i]) < 0)
         {
             perror("sem_close");
@@ -187,6 +231,5 @@ int main(int argc, char **argv)
         }
 
         shm_unlink(sh_name) == -1;
-
     }
 }

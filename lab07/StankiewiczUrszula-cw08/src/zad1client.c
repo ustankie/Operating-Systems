@@ -20,6 +20,8 @@
 #define MESSAGE_SIZE 11
 #define MAX_PRINTERS 10
 #define MAX_CLIENTS 10
+#define QUEUE_NAME "/pr_queue"
+#define MAX_MSG 3
 
 volatile bool should_close = false;
 
@@ -34,55 +36,52 @@ int printers_num;
 sem_t *semaphores[MAX_PRINTERS];
 int shared_mem[MAX_PRINTERS];
 Data *addressess[MAX_PRINTERS];
-pid_t parent=NULL;
+pid_t parent = NULL;
+mqd_t pr_queue;
 
 void handle(int signum)
 {
     should_close = true;
-    printf("Got signal %d, signal: %d\n",getpid(), signum);
-   
-    
-    if(parent==getpid()){
-        kill(0,SIGINT);
+    printf("Got signal %d from %d\n", signum, getpid());
+
+    if (parent == getpid())
+    {
+        kill(0, SIGINT);
         for (int i = 0; i < printers_num; i++)
         {
-        if (sem_close(semaphores[i]) < 0)
-        {
-            perror("sem_close");
+            if (sem_close(semaphores[i]) < 0)
+            {
+                perror("sem_close");
+            }
+
+            char sem_name[BUFF_SIZE];
+            char sh_name[BUFF_SIZE];
+
+            sprintf(sem_name, SEMAPHORE_PREFIX, i);
+            sprintf(sh_name, SHARED_MEMORY_PREFIX, i);
+            sem_unlink(sem_name);
+
+            if (munmap(addressess[i], sizeof(Data)) == -1)
+            {
+                perror("munmap");
+            }
+
+            shm_unlink(sh_name);
+
+            mq_close(pr_queue);
         }
-
-        char sem_name[BUFF_SIZE];
-        char sh_name[BUFF_SIZE];
-
-        sprintf(sem_name, SEMAPHORE_PREFIX, i);
-        sprintf(sh_name, SHARED_MEMORY_PREFIX, i);
-        sem_unlink(sem_name);
-
-
-        if (munmap(addressess[i], sizeof(Data)) == -1)
-        {
-            perror("munmap");
-        }
-
-        shm_unlink(sh_name);
-
-    }
     }
     exit(0);
-    // if (parent!=NULL)
-    // {
-    //     kill(parent, SIGTERM);
-    // }
+
 }
 
 void child_action(int i)
 {
-    srand(time(NULL)+i);
+    srand(time(NULL) + i);
     while (!should_close)
     {
-        printf("Client %d\n", i);
         char message[MESSAGE_SIZE];
-        sleep(rand() % 5);
+        sleep(rand() % 15 + 2);
 
         for (int j = 0; j < MESSAGE_SIZE - 1; j++)
         {
@@ -92,21 +91,44 @@ void child_action(int i)
 
         int valp = 0;
 
-        int id=0;
-        while(true){
+        int id = 0;
+        int success = false;
+        while (id < printers_num)
+        {
             int a = sem_trywait(semaphores[id]);
-            if(a==0){
+            if (a == 0)
+            {
                 strcpy((addressess[id]->message), message);
                 addressess[id]->client_num = i;
 
                 printf("Client: %d, to print: %s\n", addressess[id]->client_num, (addressess[id]->message));
+                success = true;
                 break;
             }
 
-            id=(id+1)%printers_num;        
-
+            id = (id + 1);
         }
-              
+
+        if (!success)
+        {
+            printf("Client %d: All printers are busy, sending msg %s to queue\n", i, message);
+            Data data;
+            memset(&data, 0, sizeof(Data));
+            data.client_num = i;
+            memcpy(data.message, message, strlen(message));
+            struct mq_attr attr;
+
+            mq_getattr(pr_queue, &attr);
+            if (attr.mq_curmsgs >= attr.mq_maxmsg)
+            {
+                printf("Client %d: Queue full, please wait\n", i);
+            }
+            if (mq_send(pr_queue, (char *)&data, sizeof(data), 10) < 0)
+            {
+                perror("mq_send");
+            }
+            printf("Client %d: Message sucessfully sent to queue\n", i);
+        }
     }
     exit(0);
 }
@@ -128,6 +150,13 @@ int main(int argc, char **argv)
     printers_num = atoi(argv[2]);
 
     printf("Number of clients: %d\nNumber of printers: %d\n", clients_num, printers_num);
+    struct mq_attr attr;
+    attr.mq_curmsgs = 0;
+    attr.mq_flags = 0;
+    attr.mq_maxmsg = MAX_MSG;
+    attr.mq_msgsize = 2 * sizeof(Data);
+
+    pr_queue = mq_open(QUEUE_NAME, O_RDWR, S_IWUSR | S_IRUSR, &attr);
 
     for (int i = 0; i < printers_num; i++)
     {
@@ -148,7 +177,7 @@ int main(int argc, char **argv)
             perror("sem_get_value");
             return -1;
         }
-        printf("valp: %d\n", valp);
+        printf("Semaphore %d value: %d\n", i, valp);
 
         shared_mem[i] = shm_open(sh_name, O_RDWR, S_IRUSR | S_IWUSR);
         if (shared_mem[i] < 0)
@@ -166,26 +195,27 @@ int main(int argc, char **argv)
     }
     parent = getpid();
 
-
-    if(setpgid(getpid(),getpid())<0){
+    if (setpgid(getpid(), getpid()) < 0)
+    {
         perror("setgid");
     }
 
     for (int i = 0; i < clients_num; i++)
-    {   pid_t child = fork();
+    {
+        pid_t child = fork();
         if (child < 0)
         {
             perror("fork");
         }
         else if (child == 0)
         {
-            printf("%d\n", getpid());
+            printf("New process %d\n", getpid());
             child_action(i);
-        }     
-        
+        }
     }
 
-    while (wait(NULL));
+    while (wait(NULL))
+        ;
 
     for (int i = 0; i < printers_num; i++)
     {
@@ -200,7 +230,6 @@ int main(int argc, char **argv)
         sprintf(sem_name, SEMAPHORE_PREFIX, i);
         sprintf(sh_name, SHARED_MEMORY_PREFIX, i);
         sem_unlink(sem_name);
-
 
         if (munmap(addressess[i], sizeof(Data)) == -1)
         {

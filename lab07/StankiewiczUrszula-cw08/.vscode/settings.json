@@ -65,6 +65,7 @@
     "stdlib.h": "c",
     "stdio.h": "c",
     "random": "c",
-    "signal.h": "c"
+    "signal.h": "c",
+    "mman.h": "c"
   }
 }
