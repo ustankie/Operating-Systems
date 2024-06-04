@@ -269,12 +269,12 @@ int main(int argc, char **argv)
         return;
     }
 
-    printf("%d\n", server_addr.s_addr);
+    printf("Server started on address: %d\n", server_addr.s_addr);
 
     in_port_t port;
     if (strcmp(argv[2], "NULL") == 0)
     {
-        port = 0;
+        port = 3333;
     }
     else
     {
@@ -290,7 +290,7 @@ int main(int argc, char **argv)
     server_socket_addr.sin_addr=server_addr;
     server_socket_addr.sin_port = htons(port);
 
-    printf("%d\n", port);
+    printf("Port: %d\n", port);
 
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
     {

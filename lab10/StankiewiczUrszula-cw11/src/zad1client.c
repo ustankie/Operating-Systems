@@ -112,7 +112,7 @@ int main(int argc, char **argv)
     in_port_t port;
     if (strcmp(argv[2], "NULL"))
     {
-        port = 0;
+        port = 3333;
     }
     else if ((port = atoi(argv[2])) < 0)
     {
